@@ -1,0 +1,11 @@
+comtypes
+httpx
+keyring
+numpy
+Pillow
+pycaw
+pyperclip
+pynput
+pystray
+sounddevice
+soundfile
