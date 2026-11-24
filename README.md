@@ -1,4 +1,4 @@
-# Zuri Flow
+﻿# Zuri Flow
 
 <p align="center">
   <img src="logo-256.png" width="140" alt="Zuri Flow logo">
@@ -24,6 +24,7 @@ English/Hinglish dictation.
 ## Features
 
 - Global **toggle** and **hold-to-talk** hotkeys (keyboard or mouse buttons)
+- Microphone and speaker selection in Settings
 - Tiny draggable HUD with a 60 px edge magnet
 - HUD docks vertically on left/right edges and horizontally on top/bottom
 - Taskbar-aware work-area clamping
@@ -174,3 +175,4 @@ view.
 ## Repository
 
 https://github.com/ElixirOfRehan/Zuri-Flow
+

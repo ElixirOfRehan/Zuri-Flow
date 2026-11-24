@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pyperclip
 import pystray
+import sounddevice as sd
 from PIL import Image, ImageTk
 from pynput import keyboard, mouse
 
@@ -103,6 +104,21 @@ def describe(binding: dict | None) -> str:
     if kind == "mouse":
         return f"Mouse: {value}"
     return f"Key: {value.upper()}"
+
+
+def list_audio_devices(kind: str) -> list[tuple[str, int]]:
+    hostapis = sd.query_hostapis()
+    devices = []
+    for index, device in enumerate(sd.query_devices()):
+        channels = (
+            device["max_input_channels"]
+            if kind == "input"
+            else device["max_output_channels"]
+        )
+        if channels > 0:
+            host = hostapis[device["hostapi"]]["name"]
+            devices.append((f"{index}: {device['name']} [{host}]", index))
+    return devices
 
 
 class KeyCaptureDialog:
@@ -851,6 +867,65 @@ class MainWindow:
         self.api_key_host = tk.Frame(page, bg="#0b0b0b")
         self.refresh_api_key_status()
 
+        audio = tk.Frame(page, bg="#151515")
+        audio.pack(fill="x", padx=34, pady=(0, 12))
+        tk.Label(
+            audio,
+            text="Audio devices",
+            bg="#151515",
+            fg="#f3f3f3",
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=16, pady=(12, 2))
+        tk.Label(
+            audio,
+            text="Choose the microphone that records and the speaker used for beeps.",
+            bg="#151515",
+            fg="#6b7280",
+            font=("Segoe UI", 8),
+            anchor="w",
+        ).pack(fill="x", padx=16)
+        self.audio_body = tk.Frame(audio, bg="#151515")
+        self.audio_body.pack(fill="x", padx=16, pady=(6, 0))
+        audio_buttons = tk.Frame(audio, bg="#151515")
+        audio_buttons.pack(fill="x", padx=16, pady=(6, 12))
+        tk.Button(
+            audio_buttons,
+            text="Refresh devices",
+            command=self.refresh_audio_devices,
+            bg="#2a2a2a",
+            fg="#f3f3f3",
+            activebackground="#3a3a3a",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=12,
+            pady=4,
+        ).pack(side="left")
+        tk.Button(
+            audio_buttons,
+            text="Test speaker",
+            command=self.test_speaker,
+            bg="#2a2a2a",
+            fg="#f3f3f3",
+            activebackground="#3a3a3a",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=12,
+            pady=4,
+        ).pack(side="left", padx=8)
+        self.audio_status = tk.Label(
+            audio_buttons,
+            text="",
+            bg="#151515",
+            fg="#6b7280",
+            font=("Segoe UI", 8),
+            anchor="w",
+        )
+        self.audio_status.pack(side="left", padx=8)
+        self.audio_maps = {"input": {}, "output": {}}
+        self.audio_vars = {}
+        self.refresh_audio_devices()
+
         self.key_values = {}
         for mode, title, description in (
             ("toggle", "Toggle activation", "Press once to start, press again to stop."),
@@ -1058,6 +1133,87 @@ class MainWindow:
     def delete_item(self, item_id: int) -> None:
         self.history.delete(item_id)
         self.refresh_history()
+
+    def refresh_audio_devices(self) -> None:
+        for child in self.audio_body.winfo_children():
+            child.destroy()
+        self.audio_maps = {"input": {}, "output": {}}
+        self.audio_vars = {}
+        for kind, label, config_key in (
+            ("input", "Microphone", "input_device"),
+            ("output", "Speaker", "output_device"),
+        ):
+            row = tk.Frame(self.audio_body, bg="#151515")
+            row.pack(fill="x", pady=3)
+            tk.Label(
+                row,
+                text=label,
+                bg="#151515",
+                fg="#9ca3af",
+                font=("Segoe UI", 8),
+                width=11,
+                anchor="w",
+            ).pack(side="left")
+            devices = list_audio_devices(kind)
+            self.audio_maps[kind] = dict(devices)
+            labels = [item[0] for item in devices]
+            if not labels:
+                tk.Label(
+                    row,
+                    text="No device found",
+                    bg="#151515",
+                    fg="#ef4444",
+                    font=("Segoe UI", 8),
+                    anchor="w",
+                ).pack(side="left", fill="x", expand=True)
+                continue
+            current = self.app.audio_config.get(config_key)
+            current_label = labels[0]
+            for item_label, item_index in devices:
+                if item_index == current:
+                    current_label = item_label
+                    break
+            var = tk.StringVar(value=current_label)
+            self.audio_vars[kind] = var
+            menu = tk.OptionMenu(
+                row,
+                var,
+                *labels,
+                command=lambda value, k=kind: self.apply_audio_choice(k, value),
+            )
+            menu.configure(
+                bg="#1d1d1d",
+                fg="#f3f3f3",
+                activebackground="#2a2a2a",
+                activeforeground="#ffffff",
+                relief="flat",
+                highlightthickness=0,
+                anchor="w",
+                width=52,
+                padx=8,
+                pady=3,
+            )
+            menu["menu"].configure(
+                bg="#1d1d1d", fg="#f3f3f3", activebackground="#3a3a3a"
+            )
+            menu.pack(side="left", fill="x", expand=True)
+
+    def apply_audio_choice(self, kind: str, label: str) -> None:
+        index = self.audio_maps.get(kind, {}).get(label)
+        if index is None:
+            return
+        try:
+            self.app.update_audio_device(kind, index)
+            self.audio_status.configure(text="Saved", fg="#22c55e")
+        except Exception as exc:
+            self.audio_status.configure(text=str(exc), fg="#ef4444")
+
+    def test_speaker(self) -> None:
+        try:
+            self.app.play_test_tone()
+            self.audio_status.configure(text="Test tone played", fg="#22c55e")
+        except Exception as exc:
+            self.audio_status.configure(text=str(exc), fg="#ef4444")
 
     def start_key_capture(self, mode: str) -> None:
         if self.key_capture:

@@ -15,4 +15,5 @@ show.flag
 *.exe
 *.pem
 secrets*
+audio.json
 

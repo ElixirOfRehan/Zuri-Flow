@@ -33,6 +33,7 @@ else:
 LOG_PATH = ROOT / "app.log"
 HOTKEYS_PATH = ROOT / "hotkeys.json"
 OVERLAY_POSITION_PATH = ROOT / "overlay.json"
+AUDIO_CONFIG_PATH = ROOT / "audio.json"
 SHOW_FLAG_PATH = ROOT / "show.flag"
 SERVICE = "whisper-local"
 USERNAME = "deepseek_api_key"
@@ -41,6 +42,7 @@ CHAT_URL = "https://api.deepseek.com/chat/completions"
 CHUNK_SECONDS = 60
 SAMPLE_RATE = 16000
 BEEP_ENABLED = True
+BEEP_OUTPUT_DEVICE = None
 
 SYSTEM_PROMPT = """You are a speech-to-text correction engine.
 Current local date and time: {now}
@@ -90,6 +92,16 @@ if sys.stderr is not None:
 def beep(frequency: int, duration: int = 60) -> None:
     if not BEEP_ENABLED:
         return
+    try:
+        if BEEP_OUTPUT_DEVICE is not None:
+            rate = 44100
+            samples = max(1, int(rate * duration / 1000))
+            t = np.linspace(0, duration / 1000, samples, endpoint=False)
+            tone = 0.18 * np.sin(2 * np.pi * frequency * t)
+            sd.play(tone, rate, device=BEEP_OUTPUT_DEVICE)
+            return
+    except Exception:
+        logging.exception("Could not play beep on selected speaker")
     try:
         winsound.Beep(frequency, duration)
     except Exception:
@@ -227,7 +239,32 @@ def pick_input() -> int | None:
             "earpods" in name or "headset" in name
         ):
             return index
+    default = sd.default.device
+    if default and default[0] is not None and int(default[0]) >= 0:
+        return int(default[0])
     return None
+
+
+def default_audio_config() -> dict:
+    default = sd.default.device
+    output = None
+    if default and default[1] is not None and int(default[1]) >= 0:
+        output = int(default[1])
+    return {"input_device": pick_input(), "output_device": output}
+
+
+def load_audio_config() -> dict:
+    config = default_audio_config()
+    try:
+        saved = json.loads(AUDIO_CONFIG_PATH.read_text(encoding="utf-8"))
+        if isinstance(saved.get("input_device"), int):
+            config["input_device"] = saved["input_device"]
+        if isinstance(saved.get("output_device"), int):
+            config["output_device"] = saved["output_device"]
+    except Exception:
+        pass
+    return config
+
 
 class Overlay:
     IDLE_W = 60
@@ -679,18 +716,19 @@ class Recorder:
         self.lock = threading.Lock()
         self.audio = SystemAudio()
 
-    def start(self) -> None:
+    def start(self, device: int | None = None) -> None:
         with self.lock:
             if self.stream is not None:
                 return
             self.frames = []
             self.hwnd = get_foreground_window()
+            selected_device = device if device is not None else pick_input()
             self.stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 channels=1,
                 dtype="float32",
                 callback=self._callback,
-                device=pick_input(),
+                device=selected_device,
             )
             self.stream.start()
             self.audio.mute()
@@ -724,6 +762,9 @@ class Recorder:
 class WhisperFlow:
     def __init__(self) -> None:
         self.hotkeys = load_hotkeys()
+        self.audio_config = load_audio_config()
+        global BEEP_OUTPUT_DEVICE
+        BEEP_OUTPUT_DEVICE = self.audio_config.get("output_device")
         self.recorder = Recorder()
         self.mode: str | None = None
         self.pressed: set[str] = set()
@@ -753,6 +794,33 @@ class WhisperFlow:
             binding.get("type") == kind
             and str(binding.get("value", "")).lower() == value.lower()
         )
+
+    def update_audio_device(self, kind: str, index: int) -> None:
+        if kind not in ("input", "output"):
+            raise ValueError("Unknown audio device kind")
+        device = sd.query_devices(index)
+        if kind == "input" and device["max_input_channels"] <= 0:
+            raise ValueError("Selected device is not an input")
+        if kind == "output" and device["max_output_channels"] <= 0:
+            raise ValueError("Selected device is not an output")
+        key = "input_device" if kind == "input" else "output_device"
+        self.audio_config[key] = int(index)
+        AUDIO_CONFIG_PATH.write_text(
+            json.dumps(self.audio_config, indent=2),
+            encoding="utf-8",
+        )
+        if kind == "output":
+            global BEEP_OUTPUT_DEVICE
+            BEEP_OUTPUT_DEVICE = int(index)
+        logging.info("Audio %s set to %s", kind, index)
+
+    def play_test_tone(self) -> None:
+        device = self.audio_config.get("output_device")
+        rate = 44100
+        t = np.linspace(0, 0.28, int(rate * 0.28), endpoint=False)
+        tone = 0.18 * np.sin(2 * np.pi * 660 * t)
+        sd.play(tone, rate, device=device)
+        sd.wait()
 
     def update_api_key(self, key: str) -> None:
         key = key.strip()
@@ -828,7 +896,7 @@ class WhisperFlow:
             if self.mode is not None or self.processing:
                 return
             self.mode = mode
-            self.recorder.start()
+            self.recorder.start(self.audio_config.get("input_device"))
             self.overlay.set_state("listening")
             beep(880)
 
