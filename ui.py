@@ -8,6 +8,7 @@ import tkinter as tk
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pyperclip
 import pystray
 import sounddevice as sd
@@ -108,17 +109,25 @@ def describe(binding: dict | None) -> str:
 
 def list_audio_devices(kind: str) -> list[tuple[str, int]]:
     hostapis = sd.query_hostapis()
-    devices = []
+    grouped = {}
     for index, device in enumerate(sd.query_devices()):
         channels = (
             device["max_input_channels"]
             if kind == "input"
             else device["max_output_channels"]
         )
-        if channels > 0:
-            host = hostapis[device["hostapi"]]["name"]
-            devices.append((f"{index}: {device['name']} [{host}]", index))
-    return devices
+        if channels <= 0:
+            continue
+        host = hostapis[device["hostapi"]]["name"]
+        priority = 0 if "WASAPI" in host else 1 if "MME" in host else 2
+        key = device["name"].strip().lower()
+        current = grouped.get(key)
+        if current is None or priority < current[0]:
+            grouped[key] = (priority, device["name"].strip(), index)
+    return [
+        (label, index)
+        for _, label, index in sorted(grouped.values(), key=lambda item: item[1].lower())
+    ]
 
 
 class KeyCaptureDialog:
@@ -610,6 +619,9 @@ class MainWindow:
         self.history = HistoryStore()
         self.key_capture = None
         self.api_key_panel = None
+        self.mic_testing = False
+        self.mic_test_stream = None
+        self.mic_max_rms = 0.0
         self.window = tk.Toplevel(parent)
         self.window.title("Zuri Flow")
         screen_w = self.window.winfo_screenwidth()
@@ -901,6 +913,19 @@ class MainWindow:
             padx=12,
             pady=4,
         ).pack(side="left")
+        self.mic_button = tk.Button(
+            audio_buttons,
+            text="Test mic",
+            command=self.toggle_mic_test,
+            bg="#2a2a2a",
+            fg="#f3f3f3",
+            activebackground="#3a3a3a",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=12,
+            pady=4,
+        )
+        self.mic_button.pack(side="left", padx=8)
         tk.Button(
             audio_buttons,
             text="Test speaker",
@@ -922,6 +947,22 @@ class MainWindow:
             anchor="w",
         )
         self.audio_status.pack(side="left", padx=8)
+        self.mic_bar = tk.Canvas(
+            audio, width=300, height=8, bg="#242424", highlightthickness=0
+        )
+        self.mic_bar.pack(fill="x", padx=16, pady=(0, 2))
+        self.mic_bar_id = self.mic_bar.create_rectangle(
+            0, 0, 0, 8, fill="#22c55e", outline=""
+        )
+        self.mic_status = tk.Label(
+            audio,
+            text="Mic test: press Test mic and speak.",
+            bg="#151515",
+            fg="#6b7280",
+            font=("Segoe UI", 8),
+            anchor="w",
+        )
+        self.mic_status.pack(fill="x", padx=16, pady=(0, 10))
         self.audio_maps = {"input": {}, "output": {}}
         self.audio_vars = {}
         self.refresh_audio_devices()
@@ -1202,6 +1243,8 @@ class MainWindow:
         index = self.audio_maps.get(kind, {}).get(label)
         if index is None:
             return
+        if kind == "input" and self.mic_testing:
+            self.stop_mic_test()
         try:
             self.app.update_audio_device(kind, index)
             self.audio_status.configure(text="Saved", fg="#22c55e")
@@ -1215,7 +1258,88 @@ class MainWindow:
         except Exception as exc:
             self.audio_status.configure(text=str(exc), fg="#ef4444")
 
+    def toggle_mic_test(self) -> None:
+        if self.mic_testing:
+            self.stop_mic_test()
+        else:
+            self.start_mic_test()
+
+    def start_mic_test(self) -> None:
+        self.stop_mic_test()
+        if self.key_capture:
+            self.key_capture.close()
+        if self.api_key_panel:
+            self.api_key_panel.close()
+        self.mic_max_rms = 0.0
+        self.mic_current_rms = 0.0
+        device = self.app.audio_config.get("input_device")
+        try:
+            self.mic_test_stream = sd.InputStream(
+                samplerate=16000,
+                channels=1,
+                dtype="float32",
+                device=device,
+                callback=self._mic_test_callback,
+            )
+            self.mic_test_stream.start()
+        except Exception as exc:
+            self.mic_test_stream = None
+            self.mic_status.configure(text=f"Mic test failed: {exc}", fg="#ef4444")
+            return
+        self.mic_testing = True
+        self.app.capture_active = True
+        self.mic_button.configure(text="Stop mic test")
+        self.mic_status.configure(text="Listening... speak now.", fg="#f59e0b")
+        self.window.after(80, self._update_mic_meter)
+        self.mic_test_after = self.window.after(7000, self.stop_mic_test)
+
+    def _mic_test_callback(self, indata, frames, time_info, status) -> None:
+        try:
+            self.mic_current_rms = float(np.sqrt(np.mean(indata * indata)))
+            self.mic_max_rms = max(self.mic_max_rms, self.mic_current_rms)
+        except Exception:
+            pass
+
+    def _update_mic_meter(self) -> None:
+        if not self.mic_testing:
+            return
+        value = min(1.0, self.mic_current_rms * 20.0)
+        width = max(1, self.mic_bar.winfo_width())
+        self.mic_bar.coords(self.mic_bar_id, 0, 0, int(width * value), 8)
+        if self.mic_current_rms > 0.005:
+            self.mic_status.configure(text="Hearing you...", fg="#22c55e")
+        else:
+            self.mic_status.configure(text="Waiting for sound...", fg="#f59e0b")
+        self.window.after(80, self._update_mic_meter)
+
+    def stop_mic_test(self) -> None:
+        if hasattr(self, "mic_test_after"):
+            try:
+                self.window.after_cancel(self.mic_test_after)
+            except Exception:
+                pass
+            self.mic_test_after = None
+        if self.mic_test_stream is not None:
+            try:
+                self.mic_test_stream.stop()
+                self.mic_test_stream.close()
+            except Exception:
+                pass
+            self.mic_test_stream = None
+        if not self.mic_testing:
+            return
+        self.mic_testing = False
+        self.app.capture_active = False
+        self.mic_button.configure(text="Test mic")
+        if self.mic_max_rms > 0.005:
+            self.mic_status.configure(text="Mic is working. Signal detected.", fg="#22c55e")
+        else:
+            self.mic_status.configure(text="No signal detected. Check the mic.", fg="#ef4444")
+        self.mic_bar.coords(self.mic_bar_id, 0, 0, 0, 8)
+
     def start_key_capture(self, mode: str) -> None:
+        if self.mic_testing:
+            self.stop_mic_test()
         if self.key_capture:
             self.key_capture.close()
         if self.api_key_panel:
@@ -1234,6 +1358,8 @@ class MainWindow:
         self.refresh_keys()
 
     def start_api_key_edit(self) -> None:
+        if self.mic_testing:
+            self.stop_mic_test()
         if self.api_key_panel:
             self.api_key_panel.close()
         if self.key_capture:
@@ -1271,6 +1397,8 @@ class MainWindow:
         self.refresh_history()
 
     def hide(self) -> None:
+        if self.mic_testing:
+            self.stop_mic_test()
         if self.key_capture:
             self.key_capture.close()
         if self.api_key_panel:

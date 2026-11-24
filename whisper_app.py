@@ -878,6 +878,8 @@ class WhisperFlow:
 
     def shutdown(self) -> None:
         logging.info("Shutting down")
+        if self.main_window and self.main_window.mic_testing:
+            self.main_window.stop_mic_test()
         if self.tray:
             self.tray.stop()
         try:

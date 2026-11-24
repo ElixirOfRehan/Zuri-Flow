@@ -24,7 +24,7 @@ English/Hinglish dictation.
 ## Features
 
 - Global **toggle** and **hold-to-talk** hotkeys (keyboard or mouse buttons)
-- Microphone and speaker selection in Settings
+- Microphone and speaker selection in Settings (one clean device per name)`n- Live microphone level test
 - Tiny draggable HUD with a 60 px edge magnet
 - HUD docks vertically on left/right edges and horizontally on top/bottom
 - Taskbar-aware work-area clamping
@@ -175,4 +175,5 @@ view.
 ## Repository
 
 https://github.com/ElixirOfRehan/Zuri-Flow
+
 
